@@ -1,0 +1,49 @@
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Docker volumes (local)
+data/
+volumes/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Certificates
+docker/nginx/ssl/*.crt
+docker/nginx/ssl/*.key
+docker/nginx/ssl/*.pem
+
+# Logs
+*.log
+logs/
+
+# Grafana provisioned
+infra/grafana/data/
