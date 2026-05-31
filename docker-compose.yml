@@ -1,0 +1,345 @@
+version: "3.9"
+
+# ============================================================
+# ANTIGRAVITY SHIELD — Docker Compose
+# ============================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &default-restart
+  restart: unless-stopped
+
+networks:
+  ag-public:
+    driver: bridge
+  ag-internal:
+    driver: bridge
+    internal: true
+  ag-monitoring:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  adguard_work:
+  adguard_conf:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+
+services:
+
+  # ──────────────────────────────────────────────────────────
+  # NGINX — Reverse Proxy + SSL Termination
+  # ──────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    <<: *default-restart
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./docker/nginx/ssl:/etc/nginx/ssl:ro
+    networks:
+      - ag-public
+      - ag-internal
+    depends_on:
+      - backend
+      - frontend
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ──────────────────────────────────────────────────────────
+  # ADGUARD HOME — DNS Filter (Layer 1)
+  # ──────────────────────────────────────────────────────────
+  adguardhome:
+    image: adguard/adguardhome:v0.107.52
+    <<: *default-restart
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "853:853/tcp"          # DNS-over-TLS
+      - "3000:3000/tcp"        # Admin UI (internal)
+    volumes:
+      - adguard_work:/opt/adguardhome/work
+      - adguard_conf:/opt/adguardhome/conf
+    networks:
+      - ag-public
+      - ag-internal
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ──────────────────────────────────────────────────────────
+  # POSTGRESQL — Primary Database
+  # ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    <<: *default-restart
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - ag-internal
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────────────────
+  # REDIS — Cache + Pub/Sub
+  # ──────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    <<: *default-restart
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+      --loglevel warning
+    volumes:
+      - redis_data:/data
+    networks:
+      - ag-internal
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────────────────
+  # BACKEND — FastAPI (Layer 3)
+  # ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./services/backend
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0
+      SECRET_KEY: ${BACKEND_SECRET_KEY}
+      ALGORITHM: ${BACKEND_ALGORITHM}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${BACKEND_ACCESS_TOKEN_EXPIRE_MINUTES}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${BACKEND_REFRESH_TOKEN_EXPIRE_DAYS}
+      CORS_ORIGINS: ${BACKEND_CORS_ORIGINS}
+      ADGUARD_HOST: ${ADGUARD_HOST}
+      ADGUARD_PORT: ${ADGUARD_PORT}
+      ADGUARD_USER: ${ADGUARD_USER}
+      ADGUARD_PASSWORD: ${ADGUARD_PASSWORD}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+    networks:
+      - ag-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ──────────────────────────────────────────────────────────
+  # FRONTEND — Next.js (Layer 4)
+  # ──────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL}
+    <<: *default-restart
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL}
+    networks:
+      - ag-internal
+    depends_on:
+      - backend
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────
+  # AG-NETWORK — Network Analytics Collector (Layer 2)
+  # ──────────────────────────────────────────────────────────
+  ag-network:
+    build:
+      context: ./services/ag-network
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0
+      ADGUARD_HOST: ${ADGUARD_HOST}
+      ADGUARD_PORT: ${ADGUARD_PORT}
+      ADGUARD_USER: ${ADGUARD_USER}
+      ADGUARD_PASSWORD: ${ADGUARD_PASSWORD}
+    networks:
+      - ag-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      adguardhome:
+        condition: service_healthy
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────
+  # AG-CONTROLLER — Device Discovery (Layer 6)
+  # ──────────────────────────────────────────────────────────
+  ag-controller:
+    build:
+      context: ./services/ag-controller
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0
+      NETWORK_INTERFACE: ${NETWORK_INTERFACE}
+      NETWORK_SUBNET: ${NETWORK_SUBNET}
+      SCAN_INTERVAL_SECONDS: ${NETWORK_SCAN_INTERVAL_SECONDS}
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────
+  # AG-AI — AI Detection Microservice (Layer 5) — STUB v1
+  # ──────────────────────────────────────────────────────────
+  ag-ai:
+    build:
+      context: ./services/ag-ai
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      MODEL_PATH: ${AI_MODEL_PATH:-/models}
+      CONFIDENCE_THRESHOLD: ${AI_CONFIDENCE_THRESHOLD:-0.7}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/1
+    networks:
+      - ag-internal
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────
+  # PROMETHEUS — Metrics (Layer 9)
+  # ──────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    <<: *default-restart
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - ag-monitoring
+      - ag-internal
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────
+  # GRAFANA — Dashboards (Layer 9)
+  # ──────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.0.0
+    <<: *default-restart
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - ag-monitoring
+      - ag-internal
+    depends_on:
+      - prometheus
+      - loki
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────
+  # LOKI — Log Aggregation (Layer 9)
+  # ──────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.0.0
+    <<: *default-restart
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./infra/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    networks:
+      - ag-monitoring
+      - ag-internal
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────
+  # NODE EXPORTER — Host Metrics (Layer 9)
+  # ──────────────────────────────────────────────────────────
+  node-exporter:
+    image: prom/node-exporter:v1.8.1
+    <<: *default-restart
+    command:
+      - "--path.rootfs=/host"
+    volumes:
+      - /:/host:ro,rslave
+    network_mode: host
+    pid: host
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────
+  # CADVISOR — Container Metrics (Layer 9)
+  # ──────────────────────────────────────────────────────────
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    <<: *default-restart
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    networks:
+      - ag-monitoring
+    logging: *default-logging
