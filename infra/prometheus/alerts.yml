@@ -1,0 +1,156 @@
+groups:
+
+  # ─── DNS / AdGuard Health ────────────────────────────────────
+  - name: adguard
+    interval: 30s
+    rules:
+
+      - alert: AdGuardDown
+        expr: up{job="adguard"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AdGuard Home exporter unreachable"
+          description: "adguard-exporter has been down for 2+ minutes. DNS blocking may be inactive."
+
+      - alert: AdGuardHighBlockRate
+        expr: |
+          (
+            rate(adguard_num_blocked_filtering[5m]) /
+            (rate(adguard_num_dns_queries[5m]) + 0.001)
+          ) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusually high DNS block rate (>80%)"
+          description: "Block rate is {{ $value | humanizePercentage }} — may indicate an overly aggressive blocklist or a misconfiguration."
+
+      - alert: AdGuardDNSQuerySpike
+        expr: rate(adguard_num_dns_queries[5m]) > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DNS query spike detected"
+          description: "{{ $value | humanize }} queries/sec over 5 minutes. Possible DNS amplification or malware on the network."
+
+      - alert: AdGuardZeroQueries
+        expr: rate(adguard_num_dns_queries[10m]) == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No DNS queries for 15 minutes"
+          description: "AdGuard is receiving no queries. Router may not be using it as DNS, or AdGuard has crashed."
+
+  # ─── System Resources ────────────────────────────────────────
+  - name: system
+    rules:
+
+      - alert: HighMemoryUsage
+        expr: |
+          (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)
+          / node_memory_MemTotal_bytes > 0.90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host memory usage above 90%"
+          description: "{{ $value | humanizePercentage }} of RAM is in use. On this 6 GB machine that leaves little buffer."
+
+      - alert: CriticalMemoryUsage
+        expr: |
+          (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)
+          / node_memory_MemTotal_bytes > 0.97
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host memory CRITICAL (>97%)"
+          description: "OOM killer may activate. Services at risk."
+
+      - alert: HighSwapUsage
+        expr: |
+          (node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes)
+          / node_memory_SwapTotal_bytes > 0.70
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Swap usage above 70%"
+          description: "{{ $value | humanizePercentage }} of swap is in use. System may become very slow."
+
+      - alert: HighCpuLoad
+        expr: node_load1 > 3.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High 1-minute CPU load average"
+          description: "Load average is {{ $value }}. On a 4-core machine, this indicates sustained overload."
+
+      - alert: DiskSpaceLow
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"} /
+          node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"} < 0.15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space below 15% on /"
+          description: "Only {{ $value | humanizePercentage }} free on root filesystem. Backups or logs may fill the disk."
+
+      - alert: DiskSpaceCritical
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"} /
+          node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"} < 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk space CRITICAL (<5%) on /"
+          description: "Root filesystem is almost full. Docker may not be able to write logs or create containers."
+
+  # ─── Container Health ────────────────────────────────────────
+  - name: containers
+    rules:
+
+      - alert: ContainerOOMKilled
+        # container_oom_events_total comes from cadvisor — works in Docker Compose
+        # kube_pod_container_status_last_terminated_reason removed (Kubernetes-only metric)
+        expr: container_oom_events_total > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container OOM killed: {{ $labels.container_label_com_docker_compose_service }}"
+          description: "A container was killed by the OOM killer. Increase mem_limit or reduce workload."
+
+      - alert: ContainerHighRestart
+        expr: |
+          rate(container_start_time_seconds{
+            container_label_com_docker_compose_service!=""
+          }[30m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container restarting frequently: {{ $labels.container_label_com_docker_compose_service }}"
+          description: "Container has restarted more than 3 times in 30 minutes."
+
+  # ─── Database ────────────────────────────────────────────────
+  # Note: no postgres_exporter service — container presence via cadvisor
+  - name: database
+    rules:
+
+      - alert: PostgresDown
+        # absent() fires when cadvisor stops reporting the postgres container
+        expr: absent(container_last_seen{container_label_com_docker_compose_service="postgres"})
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL container absent from metrics"
+          description: "cadvisor has not seen the postgres container for 2+ minutes. It may have crashed or been OOM-killed."

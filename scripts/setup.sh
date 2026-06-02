@@ -78,15 +78,19 @@ if command -v ufw &>/dev/null; then
   info "UFW configured."
 fi
 
-# --- Sysctl tuning ---
-cat >> /etc/sysctl.conf << 'EOF'
-# AntiGravity Shield tuning
+# --- Sysctl tuning (idempotent — uses drop-in file, not /etc/sysctl.conf) ---
+tee /etc/sysctl.d/99-adblock.conf > /dev/null << 'EOF'
+# AdBlock Network tuning — written by setup.sh, safe to re-run
 net.core.rmem_max=16777216
 net.core.wmem_max=16777216
 net.ipv4.tcp_rmem=4096 87380 16777216
 net.ipv4.tcp_wmem=4096 65536 16777216
+vm.swappiness=20
+net.core.netdev_max_backlog=5000
+fs.file-max=1048576
 EOF
-sysctl -p >/dev/null 2>&1
+sysctl --system >/dev/null 2>&1
+info "Kernel tuning applied via /etc/sysctl.d/99-adblock.conf"
 
 # --- Router DNS setup reminder ---
 echo ""

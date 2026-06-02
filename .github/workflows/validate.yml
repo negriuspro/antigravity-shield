@@ -1,0 +1,89 @@
+name: Validate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [master, main]
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Docker Compose syntax check ────────────────────────────
+  compose-lint:
+    name: Lint docker-compose.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create dummy .env from example
+        run: cp .env.example .env
+
+      - name: Validate docker-compose config
+        run: docker compose config --quiet
+
+      - name: Check for secrets in .env.example
+        run: |
+          # Fail if real credentials appear (not placeholder values)
+          if grep -E "(password|secret|token|key)\s*=\s*[a-zA-Z0-9/+]{32,}" .env.example; then
+            echo "::error::Real credentials found in .env.example"
+            exit 1
+          fi
+          echo "No credentials leaked."
+
+  # ─── Shell script linting ───────────────────────────────────
+  shell-lint:
+    name: Lint shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint scripts
+        run: |
+          find scripts/ -name "*.sh" -exec shellcheck -e SC1091,SC2034 {} +
+
+  # ─── AdGuard config validation ──────────────────────────────
+  adguard-config:
+    name: Validate AdGuard config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check AdGuardHome.yaml exists
+        run: |
+          [[ -f "infra/adguard/conf/AdGuardHome.yaml" ]] || {
+            echo "::error::infra/adguard/conf/AdGuardHome.yaml missing"
+            exit 1
+          }
+
+      - name: Validate YAML syntax
+        run: |
+          python3 -c "
+          import yaml, sys
+          with open('infra/adguard/conf/AdGuardHome.yaml') as f:
+              try:
+                  yaml.safe_load(f)
+                  print('AdGuardHome.yaml is valid YAML')
+              except yaml.YAMLError as e:
+                  print(f'YAML error: {e}', file=sys.stderr)
+                  sys.exit(1)
+          "
+
+  # ─── Prometheus config validation ───────────────────────────
+  prometheus-config:
+    name: Validate Prometheus config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate prometheus.yml
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/infra/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:latest \
+            promtool check config /etc/prometheus/prometheus.yml

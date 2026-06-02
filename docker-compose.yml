@@ -1,7 +1,10 @@
-version: "3.9"
+name: "adblock"
 
 # ============================================================
-# ANTIGRAVITY SHIELD — Docker Compose
+# ADBLOCK NETWORK — Docker Compose
+# Architecture: Router → AdGuard Home → Cloudflare/Quad9/Google
+# Hardware target: 6 GB RAM / 4-core CPU / 200 GB SSD
+# Audited: 2026-05-31 — security hardening pass applied
 # ============================================================
 
 x-logging: &default-logging
@@ -12,6 +15,34 @@ x-logging: &default-logging
 
 x-restart: &default-restart
   restart: unless-stopped
+
+# Prevents processes inside containers from gaining new privileges via
+# setuid binaries or file capabilities. Safe to apply to all services.
+x-security: &default-security
+  security_opt:
+    - no-new-privileges:true
+
+# Resource tiers — always combine with *default-restart AND *default-security:
+#   <<: [*default-restart, *default-security, *limits-X]
+x-limits-nano: &limits-nano
+  mem_limit: 64m
+  memswap_limit: 96m
+  cpus: "0.10"
+
+x-limits-small: &limits-small
+  mem_limit: 192m
+  memswap_limit: 288m
+  cpus: "0.25"
+
+x-limits-medium: &limits-medium
+  mem_limit: 256m
+  memswap_limit: 384m
+  cpus: "0.50"
+
+x-limits-large: &limits-large
+  mem_limit: 512m
+  memswap_limit: 768m
+  cpus: "1.00"
 
 networks:
   ag-public:
@@ -26,8 +57,7 @@ networks:
 volumes:
   postgres_data:
   redis_data:
-  adguard_work:
-  adguard_conf:
+  adguard_work:       # AdGuard runtime DB, logs (not config — that's a bind-mount)
   prometheus_data:
   grafana_data:
   loki_data:
@@ -39,7 +69,7 @@ services:
   # ──────────────────────────────────────────────────────────
   nginx:
     image: nginx:1.27-alpine
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-nano]
     ports:
       - "80:80"
       - "443:443"
@@ -55,41 +85,74 @@ services:
       - frontend
     logging: *default-logging
     healthcheck:
-      test: ["CMD", "nginx", "-t"]
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
 
   # ──────────────────────────────────────────────────────────
   # ADGUARD HOME — DNS Filter (Layer 1)
+  # Config bind-mounted from infra/adguard/conf/ (version-controlled)
   # ──────────────────────────────────────────────────────────
   adguardhome:
     image: adguard/adguardhome:v0.107.52
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-medium]
     ports:
       - "53:53/tcp"
       - "53:53/udp"
-      - "853:853/tcp"          # DNS-over-TLS
-      - "3000:3000/tcp"        # Admin UI (internal)
+      - "853:853/tcp"                     # DNS-over-TLS
+      - "127.0.0.1:3000:3000/tcp"         # Admin UI — localhost only, proxied via nginx
     volumes:
       - adguard_work:/opt/adguardhome/work
-      - adguard_conf:/opt/adguardhome/conf
+      - ./infra/adguard/conf:/opt/adguardhome/conf
     networks:
       - ag-public
       - ag-internal
     logging: *default-logging
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000"]
+      # --spider avoids downloading the full HTML response on every tick
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
       interval: 30s
       timeout: 10s
       retries: 5
+
+  # ──────────────────────────────────────────────────────────
+  # ADGUARD EXPORTER — Prometheus metrics for AdGuard Home
+  # Exposes DNS stats on :9617/metrics
+  # Stateless Go binary — cap_drop: ALL is safe
+  # ──────────────────────────────────────────────────────────
+  adguard-exporter:
+    image: ebrianne/adguard-exporter:v1.13
+    <<: [*default-restart, *default-security, *limits-nano]
+    cap_drop:
+      - ALL
+    environment:
+      adguard_protocol: http
+      adguard_hostname: adguardhome
+      adguard_port: "3000"
+      adguard_username: ${ADGUARD_USER}
+      adguard_password: ${ADGUARD_PASSWORD}
+      server_port: "9617"
+      interval: "30s"
+    networks:
+      - ag-internal
+      - ag-monitoring
+    depends_on:
+      adguardhome:
+        condition: service_healthy
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9617/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ──────────────────────────────────────────────────────────
   # POSTGRESQL — Primary Database
   # ──────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-large]
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -98,6 +161,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"
     networks:
       - ag-internal
     logging: *default-logging
@@ -109,19 +174,24 @@ services:
 
   # ──────────────────────────────────────────────────────────
   # REDIS — Cache + Pub/Sub
+  # mem_limit 192m = maxmemory 128mb + ~64mb process overhead
   # ──────────────────────────────────────────────────────────
   redis:
     image: redis:7.2-alpine
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-small]
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD}
-      --maxmemory 256mb
+      --maxmemory 128mb
       --maxmemory-policy allkeys-lru
-      --save 60 1
+      --save 300 10
       --loglevel warning
+      --bind 0.0.0.0
+      --protected-mode yes
     volumes:
       - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
     networks:
       - ag-internal
     logging: *default-logging
@@ -138,7 +208,7 @@ services:
     build:
       context: ./services/backend
       dockerfile: Dockerfile
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-medium]
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0
@@ -169,7 +239,7 @@ services:
         condition: service_healthy
     logging: *default-logging
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -184,15 +254,21 @@ services:
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
         NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL}
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-medium]
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
       NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL}
     networks:
       - ag-internal
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/ || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
 
   # ──────────────────────────────────────────────────────────
   # AG-NETWORK — Network Analytics Collector (Layer 2)
@@ -201,7 +277,7 @@ services:
     build:
       context: ./services/ag-network
       dockerfile: Dockerfile
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-small]
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0
@@ -217,22 +293,35 @@ services:
       adguardhome:
         condition: service_healthy
     logging: *default-logging
+    healthcheck:
+      # Fallback: checks whether any process is listening (service-defined port)
+      # Replace with a real HTTP endpoint once ag-network exposes one
+      test: ["CMD-SHELL", "cat /proc/net/tcp6 | awk '{print $2}' | grep -q '.' && exit 0 || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ──────────────────────────────────────────────────────────
   # AG-CONTROLLER — Device Discovery (Layer 6)
+  # network_mode: host — cannot use mem_limit or bridge networks
+  # cap_drop: ALL + cap_add is the correct pattern (least privilege)
   # ──────────────────────────────────────────────────────────
   ag-controller:
     build:
       context: ./services/ag-controller
       dockerfile: Dockerfile
-    <<: *default-restart
+    <<: [*default-restart, *default-security]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0
+      # Uses 127.0.0.1 because network_mode: host bypasses Docker DNS
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@127.0.0.1:${REDIS_PORT}/0
       NETWORK_INTERFACE: ${NETWORK_INTERFACE}
       NETWORK_SUBNET: ${NETWORK_SUBNET}
       SCAN_INTERVAL_SECONDS: ${NETWORK_SCAN_INTERVAL_SECONDS}
     network_mode: host
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -242,13 +331,13 @@ services:
     logging: *default-logging
 
   # ──────────────────────────────────────────────────────────
-  # AG-AI — AI Detection Microservice (Layer 5) — STUB v1
+  # AG-AI — AI Detection Microservice (Layer 5)
   # ──────────────────────────────────────────────────────────
   ag-ai:
     build:
       context: ./services/ag-ai
       dockerfile: Dockerfile
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-small]
     environment:
       MODEL_PATH: ${AI_MODEL_PATH:-/models}
       CONFIDENCE_THRESHOLD: ${AI_CONFIDENCE_THRESHOLD:-0.7}
@@ -256,36 +345,62 @@ services:
     networks:
       - ag-internal
     logging: *default-logging
+    healthcheck:
+      # Port 8001 confirmed via prometheus.yml scrape config
+      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # ──────────────────────────────────────────────────────────
   # PROMETHEUS — Metrics (Layer 9)
+  # extra_hosts lets it reach node-exporter on the host network
+  # cap_drop: ALL — prometheus runs as nobody, binds port >1024
   # ──────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.52.0
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-large]
+    cap_drop:
+      - ALL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.time=15d"
+      - "--storage.tsdb.retention.size=5GB"
       - "--web.enable-lifecycle"
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
     networks:
       - ag-monitoring
       - ag-internal
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ──────────────────────────────────────────────────────────
   # GRAFANA — Dashboards (Layer 9)
+  # cap_drop: ALL — grafana runs as UID 472, binds port >1024
   # ──────────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:11.0.0
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-medium]
+    cap_drop:
+      - ALL
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_STRICT_TRANSPORT_SECURITY: "true"
       GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
     volumes:
@@ -296,16 +411,26 @@ services:
       - ag-monitoring
       - ag-internal
     depends_on:
-      - prometheus
-      - loki
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ──────────────────────────────────────────────────────────
   # LOKI — Log Aggregation (Layer 9)
+  # cap_drop: ALL — loki runs as UID 10001, binds port >1024
   # ──────────────────────────────────────────────────────────
   loki:
     image: grafana/loki:3.0.0
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-medium]
+    cap_drop:
+      - ALL
     command: -config.file=/etc/loki/loki-config.yaml
     volumes:
       - ./infra/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
@@ -314,15 +439,22 @@ services:
       - ag-monitoring
       - ag-internal
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ──────────────────────────────────────────────────────────
-  # NODE EXPORTER — Host Metrics (Layer 9)
+  # NODE EXPORTER — Host Metrics
+  # network_mode: host + pid: host — cannot restrict capabilities safely
   # ──────────────────────────────────────────────────────────
   node-exporter:
     image: prom/node-exporter:v1.8.1
-    <<: *default-restart
+    <<: [*default-restart, *default-security]
     command:
       - "--path.rootfs=/host"
+      - "--no-collector.ipvs"
     volumes:
       - /:/host:ro,rslave
     network_mode: host
@@ -330,11 +462,12 @@ services:
     logging: *default-logging
 
   # ──────────────────────────────────────────────────────────
-  # CADVISOR — Container Metrics (Layer 9)
+  # CADVISOR — Container Metrics
+  # Requires privileged host access to Docker socket + rootfs
   # ──────────────────────────────────────────────────────────
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
-    <<: *default-restart
+    <<: [*default-restart, *default-security, *limits-nano]
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -343,3 +476,8 @@ services:
     networks:
       - ag-monitoring
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

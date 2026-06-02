@@ -38,8 +38,16 @@ fi
 info "Starting services..."
 docker compose up -d --remove-orphans
 
-info "Waiting for services to be healthy..."
-sleep 10
+info "Waiting for core services to be healthy..."
+WAIT_TIMEOUT=120
+ELAPSED=0
+until docker compose ps adguardhome 2>/dev/null | grep -q "healthy" || [[ $ELAPSED -ge $WAIT_TIMEOUT ]]; do
+  sleep 5
+  ELAPSED=$((ELAPSED + 5))
+  echo -n "."
+done
+echo ""
+[[ $ELAPSED -ge $WAIT_TIMEOUT ]] && warn "Timed out waiting for AdGuard — check: docker compose logs adguardhome"
 
 docker compose ps
 

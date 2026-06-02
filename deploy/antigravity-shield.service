@@ -1,0 +1,19 @@
+[Unit]
+Description=AntiGravity Shield — DNS Filter & Network Analytics
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/angel/projects/antigravity-shield
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=300
+TimeoutStopSec=60
+User=angel
+Group=docker
+
+[Install]
+WantedBy=multi-user.target

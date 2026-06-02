@@ -47,3 +47,11 @@ logs/
 
 # Grafana provisioned
 infra/grafana/data/
+
+# Backups — never commit SQL dumps or config archives
+backups/
+*.sql.gz
+*.tar.gz
+
+# Rollback state file
+.rollback_state

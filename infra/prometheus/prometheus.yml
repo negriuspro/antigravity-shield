@@ -2,12 +2,20 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
-    project: antigravity-shield
+    project: adblock-network
 
 alerting:
   alertmanagers: []
+  # To enable alerts, add alertmanager service and uncomment:
+  # alertmanagers:
+  #   - static_configs:
+  #       - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/alerts.yml
 
 scrape_configs:
+
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
@@ -22,14 +30,29 @@ scrape_configs:
       - targets: ["ag-ai:8001"]
     metrics_path: /metrics
 
+  # node-exporter runs with network_mode: host.
+  # From inside prometheus container, reach host via host.docker.internal
+  # (prometheus service has extra_hosts: ["host.docker.internal:host-gateway"])
   - job_name: node-exporter
     static_configs:
-      - targets: ["localhost:9100"]
+      - targets: ["host.docker.internal:9100"]
 
   - job_name: cadvisor
     static_configs:
       - targets: ["cadvisor:8080"]
 
-  - job_name: postgres-exporter
+  - job_name: adguard
+    scrape_interval: 30s
     static_configs:
-      - targets: ["postgres-exporter:9187"]
+      - targets: ["adguard-exporter:9617"]
+    metrics_path: /metrics
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+    metrics_path: /metrics
+
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]
+    metrics_path: /metrics
