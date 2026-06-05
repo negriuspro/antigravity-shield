@@ -86,7 +86,8 @@ services:
       - frontend
     logging: *default-logging
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      # HTTP → 301 → HTTPS: --no-check-certificate evita fallo por cert autofirmado
+      test: ["CMD-SHELL", "wget -q --spider --no-check-certificate https://127.0.0.1/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -102,7 +103,10 @@ services:
       - "53:53/tcp"
       - "53:53/udp"
       - "853:853/tcp"                     # DNS-over-TLS
-      - "3000"                              # Admin UI — accessible via nginx proxy only
+      # CRÍTICO R-NEW: "3000" asignaba puerto random al host (era 32768, expuesto al exterior)
+      # El admin UI es accesible vía nginx proxy — no necesita puerto en el host
+    expose:
+      - "3000"
     volumes:
       - adguard_work:/opt/adguardhome/work
       - ./infra/adguard/conf:/opt/adguardhome/conf
@@ -142,11 +146,8 @@ services:
       adguardhome:
         condition: service_healthy
     logging: *default-logging
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9617/metrics"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    # Sin healthcheck: imagen Go minimal sin wget/curl.
+    # El servicio funciona correctamente — restart: unless-stopped es suficiente.
 
   # ──────────────────────────────────────────────────────────
   # POSTGRESQL — Primary Database
