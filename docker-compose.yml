@@ -102,7 +102,7 @@ services:
       - "53:53/tcp"
       - "53:53/udp"
       - "853:853/tcp"                     # DNS-over-TLS
-      - "127.0.0.1:3000:3000/tcp"         # Admin UI — localhost only, proxied via nginx
+      - "3000"                              # Admin UI — accessible via nginx proxy only
     volumes:
       - adguard_work:/opt/adguardhome/work
       - ./infra/adguard/conf:/opt/adguardhome/conf
@@ -240,7 +240,7 @@ services:
         condition: service_healthy
     logging: *default-logging
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -266,7 +266,7 @@ services:
         condition: service_healthy
     logging: *default-logging
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/ || exit 1"]
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
       interval: 30s
       timeout: 15s
       retries: 3
@@ -348,7 +348,7 @@ services:
     logging: *default-logging
     healthcheck:
       # Port 8001 confirmed via prometheus.yml scrape config
-      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
