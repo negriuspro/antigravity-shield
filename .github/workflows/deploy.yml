@@ -31,11 +31,13 @@ jobs:
 
       - name: Health check final
         run: |
-          sleep 3
-          if nc -z 127.0.0.1 3003 2>/dev/null; then
-            echo "OK — Puerto :3003 responde"
+          sleep 5
+          if curl -sf http://127.0.0.1/health 2>/dev/null; then
+            echo "OK — nginx :80 responde"
+          elif nc -z 127.0.0.1 80 2>/dev/null; then
+            echo "OK — Puerto :80 abierto"
           else
-            echo "WARN — Puerto :3003 no responde (puede ser normal en hairpin NAT)"
+            echo "WARN — Puerto :80 no responde (puede ser normal en hairpin NAT)"
           fi
 
       - name: Deploy log (ultimas lineas)
