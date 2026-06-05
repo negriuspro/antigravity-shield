@@ -183,9 +183,11 @@ filters:
     id: 12
 
   # === Privacy / Tracking ===
-  - enabled: true
+  # NiceHash repo eliminado — URL da 404 desde jun-2026.
+  # Cobertura equivalente incluida en HaGeZi Multi Normal (id: 7).
+  - enabled: false
     url: https://raw.githubusercontent.com/nicehash/NiceHash-MiningBlockList/master/adguard.txt
-    name: NiceHash Crypto Mining Block
+    name: NiceHash Crypto Mining Block (DEPRECATED – 404)
     id: 13
 
   - enabled: true
