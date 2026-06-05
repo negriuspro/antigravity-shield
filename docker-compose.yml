@@ -211,7 +211,7 @@ services:
       dockerfile: Dockerfile
     <<: [*default-restart, *default-security, *limits-medium]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD_ENCODED}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0
       SECRET_KEY: ${BACKEND_SECRET_KEY}
       ALGORITHM: ${BACKEND_ALGORITHM}
@@ -280,7 +280,7 @@ services:
       dockerfile: Dockerfile
     <<: [*default-restart, *default-security, *limits-small]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD_ENCODED}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0
       ADGUARD_HOST: ${ADGUARD_HOST}
       ADGUARD_PORT: ${ADGUARD_PORT}
@@ -315,7 +315,7 @@ services:
     <<: [*default-restart, *default-security]
     environment:
       # Uses 127.0.0.1 because network_mode: host bypasses Docker DNS
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${POSTGRES_DB}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD_ENCODED}@127.0.0.1:${POSTGRES_PORT}/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@127.0.0.1:${REDIS_PORT}/0
       NETWORK_INTERFACE: ${NETWORK_INTERFACE}
       NETWORK_SUBNET: ${NETWORK_SUBNET}
