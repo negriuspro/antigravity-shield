@@ -73,7 +73,9 @@ services:
     <<: [*default-restart, *default-security, *limits-nano]
     ports:
       - "80:80"
-      - "443:443"
+      # Tailscale ocupa 0.0.0.0:443 — bindear solo en IP LAN para evitar conflicto.
+      # SHIELD_HOST_IP se define en .env (ej: 192.168.100.6)
+      - "${SHIELD_HOST_IP:-0.0.0.0}:443:443"
     volumes:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
