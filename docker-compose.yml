@@ -162,8 +162,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "127.0.0.1:5432:5432"
+    # R-09 fix: sin exposición al host — acceso via `docker exec` o tunnel SSH
     networks:
       - ag-internal
     logging: *default-logging
@@ -191,13 +190,14 @@ services:
       --protected-mode yes
     volumes:
       - redis_data:/data
-    ports:
-      - "127.0.0.1:6379:6379"
+    # R-10 fix: sin exposición al host — acceso via `docker exec`
+    environment:
+      REDISCLI_AUTH: "${REDIS_PASSWORD}"  # R-11: oculta password de ps aux e inspect
     networks:
       - ag-internal
     logging: *default-logging
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "ping"]  # R-11: usa REDISCLI_AUTH — sin -a en CLI
       interval: 10s
       timeout: 5s
       retries: 5
