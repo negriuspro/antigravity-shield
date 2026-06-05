@@ -83,6 +83,6 @@ async def scan(subnet: str, interface: str) -> list[DiscoveredDevice]:
                 if "name =" in line.lower():
                     dev.hostname = line.split("=")[-1].strip().rstrip(".")
                     break
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Hostname resolution failed for %s: %s", dev.ip, exc)
     return devices
